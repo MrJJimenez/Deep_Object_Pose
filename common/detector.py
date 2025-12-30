@@ -22,6 +22,18 @@ import torchvision.transforms as transforms
 from torch.autograd import Variable
 import torchvision.models as models
 
+# Determine the best available device
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
+
+DEVICE = get_device()
+print(f"Using device: {DEVICE}")
+
 # DOPE library imports
 sys.path.append("../")
 from models import *
@@ -256,8 +268,8 @@ class ModelData(object):
         """Loads network model from disk with given path"""
         model_loading_start_time = time.time()
         print("Loading DOPE model '{}'...".format(path))
-        net = DopeNetwork().cuda()
-        state_dict = torch.load(path)
+        net = DopeNetwork().to(DEVICE)
+        state_dict = torch.load(path, map_location=DEVICE)
 
         if self.parallel:
             # we must alter the layer names
@@ -472,7 +484,7 @@ class ObjectDetector(object):
 
         # Run network inference
         image_tensor = transform(in_img)
-        image_torch = Variable(image_tensor).cuda().unsqueeze(0)
+        image_torch = Variable(image_tensor).to(DEVICE).unsqueeze(0)
         out, seg = net_model(
             image_torch
         )  # run inference using the network (calls 'forward' method)

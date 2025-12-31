@@ -9,3 +9,6 @@ venv
 *.hdr
 google_scanned_models/
 scripts/nvisii_data_gen/output/dataset/
+data/
+common/outputs/debug/
+inference/temp_input/

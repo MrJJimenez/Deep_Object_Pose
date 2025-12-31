@@ -8,12 +8,65 @@ import os
 import simplejson as json
 import sys
 import yaml
+from scipy.spatial.transform import Rotation
 
 sys.path.append("../common/")
 from cuboid import Cuboid3d
 from cuboid_pnp_solver import CuboidPNPSolver
 from detector import ModelData, ObjectDetector
 from utils import loadimages_inference, loadweights, Draw
+
+
+def draw_coordinate_system(draw, camera_matrix, dist_coeffs, location, quaternion, axis_length=0.1):
+    """
+    Draw a 3D coordinate system at the object's centroid.
+    
+    Args:
+        draw: Draw object for rendering
+        camera_matrix: Camera intrinsic matrix
+        dist_coeffs: Distortion coefficients
+        location: 3D position of the centroid (x, y, z)
+        quaternion: Orientation as quaternion (x, y, z, w)
+        axis_length: Length of coordinate axes in meters (default 0.1m = 10cm)
+    """
+    # Convert quaternion to rotation matrix
+    # quaternion format is [x, y, z, w]
+    rot = Rotation.from_quat(quaternion)
+    rotation_matrix = rot.as_matrix()
+    
+    # Define axis endpoints in object frame (X, Y, Z axes)
+    axes_3d = np.array([
+        [axis_length, 0, 0],  # X axis (red)
+        [0, axis_length, 0],  # Y axis (green)
+        [0, 0, axis_length],  # Z axis (blue)
+    ])
+    
+    # Transform axes to world frame
+    axes_world = np.dot(rotation_matrix, axes_3d.T).T + location
+    
+    # Project centroid and axes endpoints to 2D
+    centroid_3d = np.array(location).reshape(3, 1)
+    axes_world_3d = axes_world.T
+    
+    # Project points using camera matrix
+    centroid_2d, _ = cv2.projectPoints(centroid_3d.T, np.zeros(3), np.zeros(3), 
+                                        camera_matrix, dist_coeffs)
+    axes_2d, _ = cv2.projectPoints(axes_world_3d.T, np.zeros(3), np.zeros(3),
+                                     camera_matrix, dist_coeffs)
+    
+    # Extract 2D coordinates
+    centroid_2d = tuple(centroid_2d[0][0].astype(int))
+    x_axis_2d = tuple(axes_2d[0][0].astype(int))
+    y_axis_2d = tuple(axes_2d[1][0].astype(int))
+    z_axis_2d = tuple(axes_2d[2][0].astype(int))
+    
+    # Draw axes with different colors
+    draw.draw_line(centroid_2d, x_axis_2d, line_color=(255, 0, 0), line_width=5)  # X axis - Red
+    draw.draw_line(centroid_2d, y_axis_2d, line_color=(0, 255, 0), line_width=5)  # Y axis - Green
+    draw.draw_line(centroid_2d, z_axis_2d, line_color=(0, 0, 255), line_width=5)  # Z axis - Blue
+    
+    # Draw centroid point
+    #draw.draw_dot(centroid_2d, point_color=(255, 255, 255), point_radius=4)
 
 
 class DopeNode(object):
@@ -131,12 +184,8 @@ class DopeNode(object):
                 }
             )
 
-            # Draw the cube
-            if None not in result["projected_points"]:
-                points2d = []
-                for pair in result["projected_points"]:
-                    points2d.append(tuple(pair))
-                draw.draw_cube(points2d, self.draw_color)
+            # Draw the coordinate system at the centroid instead of the cube
+            draw_coordinate_system(draw, camera_matrix, dist_coeffs, loc, ori, axis_length=10)
 
         # create directory to save image if it does not exist
         img_name_base = img_name.split("/")[-1]
@@ -277,4 +326,49 @@ if __name__ == "__main__":
                 debug=opt.debug
             )
 
+        print("------")
+        
+        # Create video from processed images
+        print("Creating video from processed images...")
+        
+        # Construct output path for this weight
+        output_path = os.path.join(
+            opt.outf,
+            weight.split("/")[-1].replace(".pth", "")
+        )
+        
+        # Collect all processed images
+        processed_images = []
+        for img_name in imgsname:
+            img_name_base = img_name.split("/")[-1]
+            img_path = os.path.join(output_path, *img_name.split("/")[:-1], img_name_base)
+            if os.path.exists(img_path):
+                processed_images.append(img_path)
+        
+        if len(processed_images) > 0:
+            # Sort images to ensure correct order
+            processed_images.sort()
+            
+            # Read first image to get dimensions
+            first_frame = cv2.imread(processed_images[0])
+            height, width, _ = first_frame.shape
+            
+            # Define video codec and create VideoWriter object
+            video_path = os.path.join(output_path, "output_video.mp4")
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            fps = 10  # frames per second
+            video_writer = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+            
+            # Write all frames to video
+            for img_path in processed_images:
+                frame = cv2.imread(img_path)
+                if frame is not None:
+                    video_writer.write(frame)
+            
+            # Release video writer
+            video_writer.release()
+            print(f"Video saved to: {video_path}")
+        else:
+            print("No processed images found to create video.")
+        
         print("------")

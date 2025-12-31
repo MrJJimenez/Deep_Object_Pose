@@ -241,7 +241,7 @@ def get_cuboid_image_space(mesh, camera):
     return np.array(cuboid, dtype=float).tolist()
 
 
-def write_json(outf, args, camera, objects, objects_data, seg_map):
+def write_json(outf, args, camera, objects, objects_data, seg_map, seg_map_no_occlusion):
     cam_xform = camera.get_camera_pose()
     eye = -cam_xform[0:3,3]
     at = -cam_xform[0:3,2]
@@ -286,16 +286,24 @@ def write_json(outf, args, camera, objects, objects_data, seg_map):
     for ii, oo in enumerate(objects):
         idx = ii+1 # objects ID indices start at '1'
 
-        num_pixels = int(np.sum((seg_map == idx)))
+        # px_count_visib: visible pixels (with occlusion from distractors)
+        px_count_visib = int(np.sum((seg_map == idx)))
 
-        if num_pixels < args.min_pixels:
+        if px_count_visib < args.min_pixels:
             continue
+        
+        # px_count_all: total pixels without occlusion
+        px_count_all = int(np.sum((seg_map_no_occlusion == idx)))
+        
+        # Calculate visibility as fraction: px_count_visib / px_count_all
+        visibility = px_count_visib / max(1, px_count_all)  # avoid division by zero
+
         projected_keypoints = get_cuboid_image_space(oo, camera)
 
         data['objects'].append({
             'class': objects_data[ii]['class'],
             'name': objects_data[ii]['name'],
-            'visibility': num_pixels,
+            'visibility': visibility,
             'projected_cuboid': projected_keypoints,
             ## 'location' and 'quaternion_xyzw' are both optional data fields,
             ## not used for training
@@ -343,6 +351,82 @@ def randomize_background(path, width, height):
     return img
 
 
+def fix_object_textures(obj, obj_path):
+    """
+    Fix texture paths for loaded objects by searching for texture files
+    in the same directory and subdirectories as the .obj file, as well as
+    in the parent directory (to handle structures like meshes/model.obj with
+    materials/textures/ at the parent level).
+    
+    obj: The loaded BlenderProc object
+    obj_path: Path to the .obj file
+    """
+    obj_dir = os.path.dirname(obj_path)
+    parent_dir = os.path.dirname(obj_dir)
+    
+    # Search for texture files in multiple locations:
+    # 1. The obj directory and its subdirectories
+    # 2. The parent directory and its subdirectories (for google scanned models structure)
+    texture_extensions = ('*.jpg', '*.jpeg', '*.png', '*.JPG', '*.JPEG', '*.PNG')
+    texture_files = []
+    
+    # Search in obj directory
+    for ext in texture_extensions:
+        texture_files.extend(glob.glob(os.path.join(obj_dir, '**', ext), recursive=True))
+    
+    # Also search in parent directory and siblings (like materials/textures/)
+    if parent_dir and os.path.exists(parent_dir):
+        for ext in texture_extensions:
+            texture_files.extend(glob.glob(os.path.join(parent_dir, '**', ext), recursive=True))
+    
+    # Remove duplicates
+    texture_files = list(set(texture_files))
+    
+    if len(texture_files) == 0:
+        return  # No textures found, nothing to fix
+    
+    print(f"Found {len(texture_files)} texture file(s) for {os.path.basename(obj_path)}")
+    
+    # Get the Blender mesh object
+    blender_obj = obj.blender_obj
+    
+    # Iterate through all materials of the object
+    if blender_obj.data.materials:
+        for mat in blender_obj.data.materials:
+            if mat and mat.use_nodes:
+                nodes = mat.node_tree.nodes
+                
+                # Find all Image Texture nodes
+                for node in nodes:
+                    if node.type == 'TEX_IMAGE':
+                        if node.image is None or not os.path.exists(bpy.path.abspath(node.image.filepath)):
+                            # Image is missing or path is broken
+                            # Try to find a matching texture file
+                            if node.image:
+                                # Get the filename from the node
+                                img_name = os.path.basename(node.image.filepath)
+                            else:
+                                # No image set, use the first available texture
+                                img_name = None
+                            
+                            # Find matching texture file
+                            matched_texture = None
+                            if img_name:
+                                for tex_file in texture_files:
+                                    if os.path.basename(tex_file) == img_name:
+                                        matched_texture = tex_file
+                                        break
+                            
+                            # If no match found and we have textures, use the first one
+                            if matched_texture is None and len(texture_files) > 0:
+                                matched_texture = texture_files[0]
+                            
+                            if matched_texture:
+                                # Load and assign the texture
+                                node.image = bpy.data.images.load(matched_texture, check_existing=True)
+                                print(f"  Loaded texture: {os.path.basename(matched_texture)}")
+
+
 def set_world_background_hdr(filename, strength=1.0, rotation_euler=None):
     """
     Sets the background with a Poly Haven HDRI file
@@ -378,6 +462,34 @@ def set_world_background_hdr(filename, strength=1.0, rotation_euler=None):
     mapping_node.inputs["Rotation"].default_value = rotation_euler
 
 
+def get_starting_frame_number(out_directory):
+    """
+    Find the highest numbered frame in the output directory to continue from there.
+    Returns 0 if no existing frames are found.
+    """
+    existing_images = glob.glob(os.path.join(out_directory, "*.png"))
+    if len(existing_images) == 0:
+        return 0
+    
+    # Extract frame numbers from filenames
+    frame_numbers = []
+    for img_path in existing_images:
+        filename = os.path.basename(img_path)
+        try:
+            # Remove extension and parse as integer
+            frame_num = int(os.path.splitext(filename)[0])
+            frame_numbers.append(frame_num)
+        except ValueError:
+            # Skip files that don't have numeric names
+            continue
+    
+    if len(frame_numbers) == 0:
+        return 0
+    
+    # Return the next frame number after the highest existing one
+    return max(frame_numbers) + 1
+
+
 def main(args):
     ## Segmentation values
     SEG_DISTRACT = 0
@@ -387,6 +499,15 @@ def main(args):
     # Make output directories
     out_directory = os.path.join(args.outf, str(args.run_id))
     os.makedirs(out_directory, exist_ok=True)
+    
+    # Find the starting frame number (continue from existing files)
+    start_frame = get_starting_frame_number(out_directory)
+    if start_frame > 0:
+        print(f"Found {start_frame} existing frames. Continuing from frame {start_frame}...")
+    
+    # Calculate the ending frame number
+    end_frame = start_frame + args.nb_frames
+    print(f"Generating frames {start_frame} to {end_frame-1} ({args.nb_frames} total frames)")
 
     # Construct list of background images
     image_types = ('*.jpg', '*.jpeg', '*.JPG', '*.JPEG', '*.png', '*.PNG', '*.hdr', '*.HDR')
@@ -462,6 +583,8 @@ def main(args):
         model_path =  object_models[random.randint(0, len(object_models) - 1)]
         obj = bp.loader.load_obj(model_path)[0]
         obj.set_cp("category_id", 1+idx)
+        # Fix textures that may be in subdirectories
+        fix_object_textures(obj, model_path)
         objects.append(obj)
         obj_class = args.object_class
         obj_name = obj_class + "_" + str(idx).zfill(3)
@@ -477,10 +600,12 @@ def main(args):
             distractor_fn = distractor_objs[random.randint(0,len(distractor_objs)-1)]
             distractor = bp.loader.load_obj(distractor_fn)[0]
             distractor.set_cp("category_id", SEG_DISTRACT)
+            # Fix textures that may be in subdirectories
+            fix_object_textures(distractor, distractor_fn)
             distractors.append(distractor)
             print(f"loaded {distractor_fn}")
 
-    for frame in range(args.nb_frames):
+    for frame in range(start_frame, end_frame):
         # Randomize light
         #light.set_location([10-random.random()*20, 10-random.random()*20,
         #                    150+random.random()*100])
@@ -532,8 +657,17 @@ def main(args):
         os.close(sys.stdout.fileno())
         fd = os.open(logfile, os.O_WRONLY)
 
+        # Render segmentation with distractors (for px_count_visib)
         segs = bp.renderer.render_segmap()
         data = bp.renderer.render()
+        
+        # Temporarily hide distractors to render segmentation without occlusion (for px_count_all)
+        for dd in distractors:
+            dd.hide()
+        segs_no_occlusion = bp.renderer.render_segmap()
+        # Show distractors again
+        for dd in distractors:
+            dd.hide(False)
 
         # disable output redirection
         os.close(fd)
@@ -560,7 +694,7 @@ def main(args):
 
         ## Export JSON file
         filename = os.path.join(out_directory, str(frame).zfill(6) + ".json")
-        write_json(filename, args, bp.camera, objects, objects_data, segs['class_segmaps'][0])
+        write_json(filename, args, bp.camera, objects, objects_data, segs['class_segmaps'][0], segs_no_occlusion['class_segmaps'][0])
 
 
 if __name__ == "__main__":

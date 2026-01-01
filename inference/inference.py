@@ -183,6 +183,12 @@ class DopeNode(object):
                     "projected_cuboid": np.array(result["projected_points"]).tolist(),
                 }
             )
+            # Draw the cube
+            if None not in result["projected_points"]:
+                points2d = []
+                for pair in result["projected_points"]:
+                    points2d.append(tuple(pair))
+                draw.draw_cube(points2d, self.draw_color)
 
             # Draw the coordinate system at the centroid instead of the cube
             draw_coordinate_system(draw, camera_matrix, dist_coeffs, loc, ori, axis_length=10)
@@ -218,9 +224,9 @@ if __name__ == "__main__":
         help="Where to store the output images and inference results.",
     )
     parser.add_argument(
-        "--data",
+        "--video",
         required=True,
-        help="folder for data images to load.",
+        help="Path to input video file (.mp4) to process.",
     )
     parser.add_argument(
         "--config",
@@ -251,12 +257,10 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--exts",
-        nargs="+",
-        type=str,
-        default=["png"],
-        help="Extensions for images to use. Can have multiple entries seperated by space. "
-        "e.g. png jpg",
+        "--fps",
+        type=int,
+        default=30,
+        help="Frames per second for output video (default: 30).",
     )
 
     parser.add_argument(
@@ -293,82 +297,182 @@ if __name__ == "__main__":
     else:
         print(f"Found {len(weights)} weights. ")
 
-    # Load inference images
-    imgs, imgsname = loadimages_inference(opt.data, extensions=opt.exts)
-
-    if len(imgs) == 0 or len(imgsname) == 0:
-        print(
-            "No input images found at specified path and extensions. Please check --data "
-            "and --exts flags and try again."
-        )
+    # Check if video file exists
+    if not os.path.exists(opt.video):
+        print(f"Video file not found: {opt.video}")
         exit()
 
+    # Open input video
+    video_capture = cv2.VideoCapture(opt.video)
+    if not video_capture.isOpened():
+        print(f"Error opening video file: {opt.video}")
+        exit()
+
+    # Get video properties
+    total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    original_fps = video_capture.get(cv2.CAP_PROP_FPS)
+    video_width = int(video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    video_height = int(video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    print(f"Input video: {opt.video}")
+    print(f"Total frames: {total_frames}")
+    print(f"Original FPS: {original_fps}")
+    print(f"Resolution: {video_width}x{video_height}")
+
     for w_i, weight in enumerate(weights):
+        print(f"\nProcessing with weight {w_i + 1} of {len(weights)}: {weight}")
         dope_node = DopeNode(config, weight, opt.parallel, opt.object)
 
-        for i in range(len(imgs)):
-            print(
-                f"({w_i + 1} of  {len(weights)}) frame {i + 1} of {len(imgs)}: {imgsname[i]}"
-            )
-            img_name = imgsname[i]
-
-            frame = cv2.imread(imgs[i])
-
-            frame = frame[..., ::-1].copy()
-
-            # call the inference node
-            dope_node.image_callback(
-                img=frame,
-                camera_info=camera_info,
-                img_name=img_name,
-                output_folder=opt.outf,
-                weight=weight,
-                debug=opt.debug
-            )
-
-        print("------")
-        
-        # Create video from processed images
-        print("Creating video from processed images...")
-        
         # Construct output path for this weight
         output_path = os.path.join(
             opt.outf,
             weight.split("/")[-1].replace(".pth", "")
         )
+        os.makedirs(output_path, exist_ok=True)
+
+        # Reset video to beginning
+        video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        # Prepare to read first frame to get processed dimensions
+        ret, first_frame = video_capture.read()
+        if not ret:
+            print("Error reading first frame")
+            continue
+
+        # Convert BGR to RGB for processing
+        first_frame_rgb = first_frame[..., ::-1].copy()
         
-        # Collect all processed images
-        processed_images = []
-        for img_name in imgsname:
-            img_name_base = img_name.split("/")[-1]
-            img_path = os.path.join(output_path, *img_name.split("/")[:-1], img_name_base)
-            if os.path.exists(img_path):
-                processed_images.append(img_path)
-        
-        if len(processed_images) > 0:
-            # Sort images to ensure correct order
-            processed_images.sort()
-            
-            # Read first image to get dimensions
-            first_frame = cv2.imread(processed_images[0])
-            height, width, _ = first_frame.shape
-            
-            # Define video codec and create VideoWriter object
-            video_path = os.path.join(output_path, "output_video.mp4")
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            fps = 10  # frames per second
-            video_writer = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
-            
-            # Write all frames to video
-            for img_path in processed_images:
-                frame = cv2.imread(img_path)
-                if frame is not None:
-                    video_writer.write(frame)
-            
-            # Release video writer
-            video_writer.release()
-            print(f"Video saved to: {video_path}")
+        # Check if downscaling will be applied
+        height, width, _ = first_frame_rgb.shape
+        scaling_factor = float(dope_node.downscale_height) / height
+        if scaling_factor < 1.0:
+            output_width = int(scaling_factor * width)
+            output_height = int(scaling_factor * height)
         else:
-            print("No processed images found to create video.")
+            output_width = width
+            output_height = height
+
+        # Create video writer for output
+        video_path = os.path.join(output_path, "output_video.mp4")
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_writer = cv2.VideoWriter(video_path, fourcc, opt.fps, (output_width, output_height))
+
+        # Reset video to beginning for actual processing
+        video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
         
+        frame_count = 0
+        last_results = None  # Store last detection results
+        last_camera_matrix = None
+        last_dist_coeffs = None
+        process_interval = 4  # Process every 4 frames
+        
+        while True:
+            ret, frame = video_capture.read()
+            if not ret:
+                break
+
+            frame_count += 1
+            
+            # Convert BGR to RGB
+            frame_rgb = frame[..., ::-1].copy()
+
+            # Check if we should run inference on this frame
+            should_process = (frame_count - 1) % process_interval == 0
+            
+            if should_process:
+                print(f"Processing frame {frame_count} of {total_frames} (running inference)...", end='\r')
+                
+                # Process frame through DOPE
+                # Update camera matrix and distortion coefficients
+                if dope_node.input_is_rectified:
+                    P = np.matrix(
+                        camera_info["projection_matrix"]["data"], dtype="float64"
+                    ).copy()
+                    P.resize((3, 4))
+                    camera_matrix = P[:, :3]
+                    dist_coeffs = np.zeros((4, 1))
+                else:
+                    camera_matrix = np.matrix(camera_info.K, dtype="float64")
+                    camera_matrix.resize((3, 3))
+                    dist_coeffs = np.matrix(camera_info.D, dtype="float64")
+                    dist_coeffs.resize((len(camera_info.D), 1))
+
+                # Downscale frame if necessary
+                height, width, _ = frame_rgb.shape
+                scaling_factor = float(dope_node.downscale_height) / height
+                if scaling_factor < 1.0:
+                    camera_matrix[:2] *= scaling_factor
+                    frame_rgb = cv2.resize(
+                        frame_rgb, (int(scaling_factor * width), int(scaling_factor * height))
+                    )
+
+                dope_node.pnp_solver.set_camera_intrinsic_matrix(camera_matrix)
+                dope_node.pnp_solver.set_dist_coeffs(dist_coeffs)
+
+                # Detect object
+                results, _ = ObjectDetector.detect_object_in_image(
+                    dope_node.model.net, dope_node.pnp_solver, frame_rgb, dope_node.config_detect,
+                    grid_belief_debug=False
+                )
+                
+                # Store results for next frames
+                last_results = results
+                last_camera_matrix = camera_matrix
+                last_dist_coeffs = dist_coeffs
+            else:
+                print(f"Processing frame {frame_count} of {total_frames} (reusing previous results)...", end='\r')
+                
+                # Use stored results from last processed frame
+                results = last_results
+                camera_matrix = last_camera_matrix
+                dist_coeffs = last_dist_coeffs
+                
+                # Still need to downscale frame for consistent output size
+                height, width, _ = frame_rgb.shape
+                scaling_factor = float(dope_node.downscale_height) / height
+                if scaling_factor < 1.0:
+                    frame_rgb = cv2.resize(
+                        frame_rgb, (int(scaling_factor * width), int(scaling_factor * height))
+                    )
+
+            # Copy and draw image
+            img_copy = frame_rgb.copy()
+            im = Image.fromarray(img_copy)
+            draw = Draw(im)
+
+            # Draw results on frame (whether new or reused)
+            if results is not None:
+                for _, result in enumerate(results):
+                    if result["location"] is None:
+                        continue
+
+                    loc = result["location"]
+                    ori = result["quaternion"]
+
+                    # Draw the cube
+                    if None not in result["projected_points"]:
+                        points2d = []
+                        for pair in result["projected_points"]:
+                            points2d.append(tuple(pair))
+                        draw.draw_cube(points2d, dope_node.draw_color)
+
+                    # Draw the coordinate system at the centroid
+                    draw_coordinate_system(draw, camera_matrix, dist_coeffs, loc, ori, axis_length=10)
+
+            # Convert PIL image back to OpenCV format (RGB to BGR)
+            output_frame = np.array(im)
+            output_frame_bgr = output_frame[..., ::-1].copy()
+
+            # Write frame to output video
+            video_writer.write(output_frame_bgr)
+
+        print(f"\nProcessed {frame_count} frames")
+        
+        # Release video writer
+        video_writer.release()
+        print(f"Output video saved to: {video_path}")
         print("------")
+
+    # Release video capture
+    video_capture.release()
+    print("\nDone!")

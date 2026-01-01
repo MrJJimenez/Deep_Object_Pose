@@ -335,9 +335,16 @@ def draw_cuboid_markers(objects, camera, im):
 def randomize_background(path, width, height):
     img = Image.open(path)
 
-    # Randomly rotate
-    angle = 45.0 - random.random()*90.0
+    # More aggressive random rotation (full 360 degrees)
+    angle = random.random() * 360.0
     img = crop_to_rotation(img, angle)
+    
+    # Random zoom/scale (0.8x to 1.5x)
+    scale_factor = 0.8 + random.random() * 0.7
+    new_w = int(img.size[0] * scale_factor)
+    new_h = int(img.size[1] * scale_factor)
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+    
     img = scale_to_original_shape(img, width, height)
 
     # Randomly flip in horizontal and vertical directions
@@ -347,6 +354,22 @@ def randomize_background(path, width, height):
     if random.random() > 0.5:
         # flip vertical
         img = img.transpose(Image.FLIP_TOP_BOTTOM)
+    
+    # Random brightness adjustment (0.7x to 1.3x)
+    from PIL import ImageEnhance
+    brightness_factor = 0.7 + random.random() * 0.6
+    enhancer = ImageEnhance.Brightness(img)
+    img = enhancer.enhance(brightness_factor)
+    
+    # Random contrast adjustment (0.8x to 1.2x)
+    contrast_factor = 0.8 + random.random() * 0.4
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(contrast_factor)
+    
+    # Random color/saturation adjustment (0.7x to 1.3x)
+    color_factor = 0.7 + random.random() * 0.6
+    enhancer = ImageEnhance.Color(img)
+    img = enhancer.enhance(color_factor)
 
     return img
 
@@ -462,6 +485,41 @@ def set_world_background_hdr(filename, strength=1.0, rotation_euler=None):
     mapping_node.inputs["Rotation"].default_value = rotation_euler
 
 
+def optimize_cycles_for_mac_metal():
+    """
+    Optimize Cycles renderer settings for Mac M2 Metal acceleration.
+    This speeds up rendering significantly on Apple Silicon.
+    """
+    scene = bpy.context.scene
+    cycles = scene.cycles
+    
+    # Use GPU (Metal on Mac)
+    cycles.device = 'GPU'
+    
+    # Enable Metal in preferences
+    prefs = bpy.context.preferences
+    cprefs = prefs.addons['cycles'].preferences
+    cprefs.compute_device_type = 'METAL'
+    
+    # Get all available Metal devices
+    cprefs.get_devices()
+    
+    # Enable all available Metal devices (M2 GPU)
+    for device in cprefs.devices:
+        device.use = True
+        print(f"Enabled device: {device.name} (type: {device.type})")
+    
+    # Optimize render settings for speed
+    cycles.use_adaptive_sampling = True  # Stop sampling pixels that converge early
+    cycles.adaptive_threshold = 0.05     # Higher = faster but slightly less quality
+    cycles.use_denoising = True          # Enable denoising for cleaner images with fewer samples
+    cycles.denoiser = 'OPENIMAGEDENOISE'  # Fast denoiser
+    
+    # Note: tile_x and tile_y removed in Blender 3.0+ (uses adaptive tiling automatically)
+    
+    print("Cycles renderer optimized for Mac M2 Metal")
+
+
 def get_starting_frame_number(out_directory):
     """
     Find the highest numbered frame in the output directory to continue from there.
@@ -542,6 +600,9 @@ def main(args):
 
     # Set up blenderproc
     bp.init()
+    
+    # Optimize for Mac M2 Metal acceleration
+    optimize_cycles_for_mac_metal()
 
     # Set the camera to be in front of the object
     cam_pose = bp.math.build_transformation_mat([0, -25, 0], [np.pi / 2, 0, 0])
@@ -573,7 +634,7 @@ def main(args):
 
     # Renderer setup
     bp.renderer.set_output_format('PNG')
-    bp.renderer.set_render_devices(desired_gpu_ids=[0])
+    bp.renderer.set_max_amount_of_samples(128)  # Reduce samples for faster rendering (increase for better quality)
 
 
     # Create objects
@@ -642,9 +703,12 @@ def main(args):
         if args.backgrounds_folder:
             background_path = backdrop_images[random.randint(0, len(backdrop_images) - 1)]
             if os.path.splitext(background_path)[1].lower() == ".hdr":
-                strength = random.random()+0.5
-                rotation = [random.random()*0.2-0.1, random.random()*0.2-0.1,
-                            random.random()*0.2-0.1]
+                # More aggressive brightness variation (0.3 to 2.5)
+                strength = 0.3 + random.random() * 2.2
+                # More aggressive rotation: full range on all axes (0 to 2*pi radians)
+                rotation = [random.random() * 2 * pi, 
+                           random.random() * 2 * pi,
+                           random.random() * 2 * pi]
                 set_world_background_hdr(background_path, strength, rotation)
             else:
                 bp.renderer.set_output_format(enable_transparency=True)

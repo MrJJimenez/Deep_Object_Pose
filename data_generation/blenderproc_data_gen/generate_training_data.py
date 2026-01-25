@@ -94,12 +94,18 @@ def Rz(A):
 def ur():
     return 2.0*random.random() - 1.0
 
-def random_rotation_matrix(max_angle=180):
-    mr = pi*(max_angle/180.0)
-    # Orient the board so a white square (sq #0) in UL corner
-    RY = Ry(-0.5*pi)
+def random_rotation_matrix(max_angle=180, offset_x=pi, offset_y=0.0, offset_z=0.0):
+    """
+    Returns a random rotation matrix with optional default rotation offsets in x, y, and z (in radians).
+    By default, applies an offset in y so a white square is in the UL corner.
+    """
+    mr = pi * (max_angle / 180.0)
+    # Orient the board so a white square (sq #0) in UL corner, plus user-specified offsets
+    RY = Ry(-0.5 * pi + offset_y)
+    RX = Rx(offset_x)
+    RZ = Rz(offset_z)
     # add some random rotations
-    return RY @ Rx(mr*ur()) @ Ry(mr*ur()) @ Rz(mr*ur())
+    return RY @ RX @ RZ @ Rx(mr * ur()) @ Ry(mr * ur()) @ Rz(mr * ur())
 
 
 def rotated_rectangle_extents(w, h, angle):
@@ -336,6 +342,9 @@ def randomize_background(path, width, height):
     img = Image.open(path)
 
     # More aggressive random rotation (full 360 degrees)
+    # Randomly rotate
+    #angle = 45.0 - random.random()*90.0 # original
+  
     angle = random.random() * 360.0
     img = crop_to_rotation(img, angle)
     

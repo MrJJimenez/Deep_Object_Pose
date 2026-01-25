@@ -124,7 +124,7 @@ class DopeNode(object):
         img_name,  # this is the name of the img file to save, it needs the .png at the end
         output_folder,  # folder where to put the output
         weight,
-        debug=False
+        debug=True
     ):
         # Update camera matrix and distortion coefficients
         if self.input_is_rectified:
@@ -412,7 +412,7 @@ if __name__ == "__main__":
                 # Detect object
                 results, _ = ObjectDetector.detect_object_in_image(
                     dope_node.model.net, dope_node.pnp_solver, frame_rgb, dope_node.config_detect,
-                    grid_belief_debug=False
+                    grid_belief_debug=True
                 )
                 
                 # Store results for next frames

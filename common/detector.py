@@ -521,6 +521,16 @@ class ObjectDetector(object):
                     .data
                 )
                 belief = torch.clamp(belief, 0, 1).cpu()
+                                
+                # Resize belief map to match input image dimensions exactly
+                if belief.shape != in_img.shape[:2]:
+                    belief = torch.nn.functional.interpolate(
+                        belief.unsqueeze(0).unsqueeze(0),
+                        size=(in_img.shape[0], in_img.shape[1]),
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze()
+                    
                 belief = torch.cat(
                     [
                         belief.unsqueeze(0) + in_img[:, :, 0],

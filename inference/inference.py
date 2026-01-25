@@ -124,7 +124,7 @@ class DopeNode(object):
         img_name,  # this is the name of the img file to save, it needs the .png at the end
         output_folder,  # folder where to put the output
         weight,
-        debug=True
+        debug=False
     ):
         # Update camera matrix and distortion coefficients
         if self.input_is_rectified:
@@ -276,6 +276,14 @@ if __name__ == "__main__":
         "the results"
     )
 
+    parser.add_argument(
+        '--process-interval',
+        type=int,
+        default=4,
+        help="Run inference every N frames. Intermediate frames reuse the previous detection "
+        "results. Higher values = faster processing but less accurate tracking (default: 4).",
+    )
+
     opt = parser.parse_args()
 
     # load the configs
@@ -357,6 +365,13 @@ if __name__ == "__main__":
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         video_writer = cv2.VideoWriter(video_path, fourcc, opt.fps, (output_width, output_height))
 
+        # Create belief map video writer if debug mode is enabled
+        belief_video_writer = None
+        belief_video_path = None
+        last_belief_frame = None
+        if opt.debug:
+            belief_video_path = os.path.join(output_path, "belief_maps_video.mp4")
+
         # Reset video to beginning for actual processing
         video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
         
@@ -364,7 +379,7 @@ if __name__ == "__main__":
         last_results = None  # Store last detection results
         last_camera_matrix = None
         last_dist_coeffs = None
-        process_interval = 4  # Process every 4 frames
+        process_interval = opt.process_interval  # Process every N frames
         
         while True:
             ret, frame = video_capture.read()
@@ -410,10 +425,26 @@ if __name__ == "__main__":
                 dope_node.pnp_solver.set_dist_coeffs(dist_coeffs)
 
                 # Detect object
-                results, _ = ObjectDetector.detect_object_in_image(
+                results, belief_imgs = ObjectDetector.detect_object_in_image(
                     dope_node.model.net, dope_node.pnp_solver, frame_rgb, dope_node.config_detect,
-                    grid_belief_debug=True
+                    grid_belief_debug=opt.debug
                 )
+                
+                # Handle belief map video if debug mode is enabled
+                if opt.debug and belief_imgs is not None:
+                    # Convert PIL Image to numpy array for OpenCV
+                    belief_frame = np.array(belief_imgs)
+                    belief_frame_bgr = cv2.cvtColor(belief_frame, cv2.COLOR_RGB2BGR)
+                    
+                    # Initialize belief video writer on first frame (now we know the size)
+                    if belief_video_writer is None:
+                        belief_height, belief_width = belief_frame_bgr.shape[:2]
+                        belief_video_writer = cv2.VideoWriter(
+                            belief_video_path, fourcc, opt.fps, (belief_width, belief_height)
+                        )
+                    
+                    belief_video_writer.write(belief_frame_bgr)
+                    last_belief_frame = belief_frame_bgr
                 
                 # Store results for next frames
                 last_results = results
@@ -434,6 +465,10 @@ if __name__ == "__main__":
                     frame_rgb = cv2.resize(
                         frame_rgb, (int(scaling_factor * width), int(scaling_factor * height))
                     )
+                
+                # Reuse last belief frame for skipped frames to keep videos synchronized
+                if opt.debug and belief_video_writer is not None and last_belief_frame is not None:
+                    belief_video_writer.write(last_belief_frame)
 
             # Copy and draw image
             img_copy = frame_rgb.copy()
@@ -471,6 +506,12 @@ if __name__ == "__main__":
         # Release video writer
         video_writer.release()
         print(f"Output video saved to: {video_path}")
+        
+        # Release belief map video writer if it was created
+        if belief_video_writer is not None:
+            belief_video_writer.release()
+            print(f"Belief maps video saved to: {belief_video_path}")
+        
         print("------")
 
     # Release video capture
